@@ -1,8 +1,21 @@
 import re
 import libvirt
-
+import os
+import shutil
+import subprocess
+import threading
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
 LIBVIRT_URI = "qemu:///system"
+
+IMAGE_DIR = Path("/var/lib/libvirt/images/cloud-maker")
+API_IMAGE_DIR = IMAGE_DIR / "api"
+BASE_IMAGE = IMAGE_DIR / "ubuntu-24.04-base.img"
+
+SSH_PUBLIC_KEY = Path.home() / ".ssh/cloud-maker-test.pub"
+
+VM_LOCK = threading.Lock ()
 
 STATE_NAMES = {
     libvirt.VIR_DOMAIN_NOSTATE: "unknown",
@@ -126,3 +139,291 @@ def stop_vm(name):
 
     finally:
         conn.close()
+
+def build_vm_xml(name, cpus, memory_mb, disk_path, seed_path):
+    domain = ET.Element("domain", type="kvm")
+
+    ET.SubElement(domain, "name").text = name
+
+    ET.SubElement(
+        domain,
+        "memory",
+        unit="MiB",
+    ).text = str(memory_mb)
+
+    ET.SubElement(
+        domain,
+        "vcpu",
+    ).text = str(cpus)
+
+    os_element = ET.SubElement(domain, "os")
+
+    ET.SubElement(
+        os_element,
+        "type",
+        arch="x86_64",
+    ).text = "hvm"
+
+    ET.SubElement(os_element, "boot", dev="hd")
+
+    # Поддержка корректного выключения гостевой ОС
+    features = ET.SubElement(domain, "features")
+    ET.SubElement(features, "acpi")
+
+    devices = ET.SubElement(domain, "devices")
+
+    # Основной виртуальный диск
+    disk = ET.SubElement(
+        devices,
+        "disk",
+        type="file",
+        device="disk",
+    )
+
+    ET.SubElement(
+        disk,
+        "driver",
+        name="qemu",
+        type="qcow2",
+    )
+
+    ET.SubElement(disk, "source", file=str(disk_path))
+    ET.SubElement(disk, "target", dev="vda", bus="virtio")
+
+    # Виртуальный CD-ROM с cloud-init
+    cdrom = ET.SubElement(
+        devices,
+        "disk",
+        type="file",
+        device="cdrom",
+    )
+
+    ET.SubElement(
+        cdrom,
+        "driver",
+        name="qemu",
+        type="raw",
+    )
+
+    ET.SubElement(cdrom, "source", file=str(seed_path))
+    ET.SubElement(cdrom, "target", dev="sda", bus="sata")
+    ET.SubElement(cdrom, "readonly")
+
+    # Сетевая карта
+    interface = ET.SubElement(
+        devices,
+        "interface",
+        type="network",
+    )
+
+    ET.SubElement(interface, "source", network="default")
+    ET.SubElement(interface, "model", type="virtio")
+
+    # Консоль
+    serial = ET.SubElement(devices, "serial", type="pty")
+    ET.SubElement(serial, "target", port="0")
+
+    console = ET.SubElement(devices, "console", type="pty")
+    ET.SubElement(
+        console,
+        "target",
+        type="serial",
+        port="0",
+    )
+
+    return ET.tostring(domain, encoding="unicode")
+
+def create_cloud_init(name, seed_path):
+    public_key = SSH_PUBLIC_KEY.read_text().strip()
+
+    if not public_key.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-")):
+        raise ValueError("Invalid SSH public key")
+
+    user_data = f"""#cloud-config
+hostname: {name}
+users:
+  - default
+ssh_authorized_keys:
+  - {public_key}
+ssh_pwauth: false
+"""
+
+    metadata = f"""instance-id: {name}
+local-hostname: {name}
+"""
+
+    user_file = API_IMAGE_DIR / f"{name}-user-data"
+    meta_file = API_IMAGE_DIR / f"{name}-meta-data"
+
+    try:
+        user_file.write_text(user_data)
+        meta_file.write_text(metadata)
+
+        subprocess.run(
+            [
+                "cloud-localds",
+                str(seed_path),
+                str(user_file),
+                str(meta_file),
+            ],
+            check=True,
+        )
+
+        os.chmod(seed_path, 0o660)
+
+    finally:
+        user_file.unlink(missing_ok=True)
+        meta_file.unlink(missing_ok=True)
+
+def create_vm(name, cpus, memory_mb, disk_gb):
+    if not re.fullmatch(r"cm-api-[a-z0-9-]+", name):
+        raise ValueError("VM name must start with cm-api-")
+
+    if not 1 <= cpus <= 4:
+        raise ValueError("CPU count must be between 1 and 4")
+
+    if not 512 <= memory_mb <= 4096:
+        raise ValueError("Memory must be between 512 and 4096 MB")
+
+    if not 5 <= disk_gb <= 30:
+        raise ValueError("Disk size must be between 5 and 30 GB")
+
+    disk_path = API_IMAGE_DIR / f"{name}.qcow2"
+    seed_path = API_IMAGE_DIR / f"{name}-seed.iso"
+
+    if not BASE_IMAGE.is_file():
+        raise RuntimeError("Base Ubuntu image not found")
+
+    if not SSH_PUBLIC_KEY.is_file():
+        raise RuntimeError("SSH public key not found")
+
+    with VM_LOCK:
+        conn = connect()
+        vm = None
+
+        try:
+            try:
+                existing = conn.lookupByName(name)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
+                    raise
+            else:
+                raise VMConflict(f"VM '{name}' already exists")
+
+            if disk_path.exists() or seed_path.exists():
+                raise VMConflict("VM storage files already exist")
+
+            try:
+                # Создаём диск из базового образа
+                shutil.copyfile(BASE_IMAGE, disk_path)
+
+                subprocess.run(
+                    [
+                        "qemu-img",
+                        "resize",
+                        str(disk_path),
+                        f"{disk_gb}G",
+                    ],
+                    check=True,
+                )
+
+                os.chmod(disk_path, 0o660)
+
+                # Создаём конфигурацию cloud-init
+                create_cloud_init(name, seed_path)
+
+                # Формируем XML
+                xml = build_vm_xml(
+                    name,
+                    cpus,
+                    memory_mb,
+                    disk_path,
+                    seed_path,
+                )
+
+                # Регистрируем ВМ в libvirt
+                vm = conn.defineXML(xml)
+
+                if vm is None:
+                    raise RuntimeError("Failed to define VM")
+
+                # Запускаем виртуальную машину
+                vm.create()
+
+                return {
+                    "message": "VM created successfully",
+                    "vm": vm_to_dict(vm),
+                }
+
+            except Exception:
+                # При ошибке убираем частично созданные ресурсы
+                if vm is not None:
+                    try:
+                        if vm.isActive():
+                            vm.destroy()
+
+                        vm.undefine()
+                    except libvirt.libvirtError:
+                        pass
+
+                disk_path.unlink(missing_ok=True)
+                seed_path.unlink(missing_ok=True)
+                raise
+
+        finally:
+            conn.close()
+
+def delete_vm(name):
+    if not re.fullmatch(r"cm-api-[a-z0-9-]+", name):
+        raise VMNotFound(f"VM '{name}' not found")
+
+    disk_path = API_IMAGE_DIR / f"{name}.qcow2"
+    seed_path = API_IMAGE_DIR / f"{name}-seed.iso"
+
+    with VM_LOCK:
+        conn = connect()
+
+        try:
+            vm = find_vm(conn, name)
+
+            if vm.isActive():
+                raise VMConflict(
+                    "Stop the VM before deleting it"
+                )
+
+            # Проверяем диски в конфигурации ВМ.
+            # Не удаляем машину, если используются другие пути.
+            xml = ET.fromstring(vm.XMLDesc(0))
+
+            source_paths = set()
+
+            for source in xml.findall("./devices/disk/source"):
+                path = source.get("file")
+
+                if path is not None:
+                    source_paths.add(path)
+
+            expected = {
+                str(disk_path),
+                str(seed_path),
+            }
+
+            if source_paths != expected:
+                raise VMConflict(
+                    "VM storage does not match Cloud Maker layout"
+                )
+
+            # Удаляем регистрацию ВМ из libvirt
+            vm.undefine()
+
+            # Удаляем принадлежащие ей файлы
+            disk_path.unlink(missing_ok=True)
+            seed_path.unlink(missing_ok=True)
+
+            return {
+                "message": "VM deleted successfully",
+                "name": name,
+            }
+
+        finally:
+            conn.close()

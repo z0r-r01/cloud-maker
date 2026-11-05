@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Virtual machines
+*.qcow2
+*.img
+*.iso
+
+# Private SSH keys
+*.pem
+id_rsa
+id_ed25519
+cloud-maker-test
+
+# Generated files
+data/
+runtime/

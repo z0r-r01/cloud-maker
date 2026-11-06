@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cloud Maker — панель управления</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0b1220; color: #ecf2ff; }
+    main { max-width: 1100px; margin: auto; padding: 36px 20px 72px; }
+    header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    h1 { font-size: 2rem; margin: 0; }
+    h2 { margin: 0 0 18px; font-size: 1.22rem; }
+    .muted { color: #9aabc7; }
+    .card { background: #151f32; border: 1px solid #293852; border-radius: 16px; padding: 24px; margin-top: 22px; }
+    .stats { display: flex; gap: 20px; flex-wrap: wrap; }
+    .stat { flex: 1; min-width: 210px; background: #101929; padding: 18px; border-radius: 12px; }
+    .stat strong { display: block; font-size: 1.4rem; margin-top: 6px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+    label { display: flex; flex-direction: column; gap: 7px; font-size: 0.9rem; }
+    input, textarea { font: inherit; color: #ecf2ff; background: #0c1422; border: 1px solid #3b4c66; border-radius: 9px; padding: 10px 12px; width: 100%; }
+    input:focus, textarea:focus { outline: 2px solid #4c8bff; outline-offset: 1px; }
+    textarea { min-height: 74px; resize: vertical; }
+    .full { margin-top: 14px; }
+    button { font: inherit; color: white; background: #346ce4; border: 0; border-radius: 9px; padding: 10px 14px; cursor: pointer; }
+    button:hover:not(:disabled) { filter: brightness(1.12); }
+    button:disabled { cursor: not-allowed; opacity: 0.4; }
+    button.secondary { background: #33435f; }
+    button.danger { background: #ae3f50; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 610px; }
+    th, td { text-align: left; border-bottom: 1px solid #293852; padding: 14px 9px; }
+    th { color: #aebfda; font-weight: 600; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .badge { display: inline-block; padding: 5px 8px; border-radius: 7px; background: #37435c; }
+    .badge.running { background: #145f47; color: #baf4d6; }
+    .badge.shut_off { background: #5c4830; color: #f3deba; }
+    #notice { margin-top: 18px; min-height: 20px; }
+    #notice.error { color: #ff9fa9; }
+    #notice.success { color: #a5edc8; }
+    .hint { margin: 12px 0 0; font-size: 0.86rem; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>☁ Cloud Maker</h1>
+      <p class="muted">Управление виртуальными машинами QEMU/KVM через libvirt</p>
+    </div>
+    <button id="refresh" type="button" class="secondary">Обновить</button>
+  </header>
+
+  <section class="card" aria-labelledby="quota-title">
+    <h2 id="quota-title">Ресурсы облака</h2>
+    <div class="stats">
+      <div class="stat"><span class="muted">vCPU занято</span><strong id="cpu-usage">—</strong></div>
+      <div class="stat"><span class="muted">RAM занято</span><strong id="ram-usage">—</strong></div>
+      <div class="stat"><span class="muted">Создано ВМ</span><strong id="vm-count">—</strong></div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="create-title">
+    <h2 id="create-title">Создать виртуальную машину</h2>
+    <form id="create-form">
+      <div class="grid">
+        <label>Имя ВМ
+          <input name="name" value="cm-api-demo" required pattern="cm-api-[a-z0-9-]+" title="Имя начинается с cm-api- и содержит только a-z, 0-9, дефис">
+        </label>
+        <label>Количество vCPU
+          <input name="cpus" type="number" min="1" max="4" value="1" required>
+        </label>
+        <label>RAM (MiB)
+          <input name="memory_mb" type="number" min="512" max="4096" value="1024" required>
+        </label>
+        <label>Диск (GiB)
+          <input name="disk_gb" type="number" min="5" max="30" value="10" required>
+        </label>
+        <label>Hostname (необязательно)
+          <input name="hostname" maxlength="63" placeholder="по умолчанию — имя ВМ">
+        </label>
+      </div>
+      <label class="full">Публичный SSH-ключ (необязательно)
+        <textarea name="ssh_public_key" placeholder="ssh-ed25519 AAAA..."></textarea>
+      </label>
+      <p class="hint muted">Если ключ не указан, используется ключ по умолчанию из настроек Cloud Maker.</p>
+      <p><button id="create-btn" type="submit">Создать и запустить</button></p>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="vm-title">
+    <div class="toolbar">
+      <h2 id="vm-title">Виртуальные машины</h2>
+      <span class="muted" id="updated">Автообновление: 5 сек.</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Имя</th><th>Состояние</th><th>vCPU</th><th>RAM</th><th>Действия</th></tr></thead>
+        <tbody id="vms-body"><tr><td colspan="5" class="muted">Загрузка...</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint muted">Для удаления сначала остановите ВМ и дождитесь состояния shut_off.</p>
+  </section>
+  <p id="notice" role="status" aria-live="polite"></p>
+</main>
+<script>
+  const notice = document.getElementById('notice');
+  const body = document.getElementById('vms-body');
+  const form = document.getElementById('create-form');
+  let busy = false;
+
+  function message(text, kind = 'success') {
+    notice.textContent = text;
+    notice.className = kind;
+  }
+
+  async function api(path, options = {}) {
+    let response;
+    try {
+      response = await fetch(path, options);
+    } catch (error) {
+      throw new Error(`Не удалось связаться с API: ${error.message}`);
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = data.detail;
+      const reason = typeof detail === 'string' ? detail : JSON.stringify(detail ?? data);
+      throw new Error(`HTTP ${response.status}: ${reason}`);
+    }
+    return data;
+  }
+
+  function addCell(row, value) {
+    const cell = document.createElement('td');
+    cell.textContent = String(value);
+    row.appendChild(cell);
+    return cell;
+  }
+
+  function actionButton(label, type, disabled, callback) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.className = type;
+    button.disabled = disabled || busy;
+    button.addEventListener('click', callback);
+    return button;
+  }
+
+  function renderVMs(vms) {
+    body.replaceChildren();
+    if (vms.length === 0) {
+      const row = document.createElement('tr');
+      addCell(row, 'Виртуальных машин пока нет').colSpan = 5;
+      body.appendChild(row);
+      return;
+    }
+
+    for (const vm of vms) {
+      const row = document.createElement('tr');
+      addCell(row, vm.name);
+      const state = addCell(row, vm.state);
+      state.className = 'badge-cell';
+      const badge = document.createElement('span');
+      badge.className = `badge ${vm.state}`;
+      badge.textContent = vm.state;
+      state.replaceChildren(badge);
+      addCell(row, vm.cpus);
+      addCell(row, `${vm.memory_mb} MiB`);
+
+      const actions = document.createElement('td');
+      actions.className = 'actions';
+      actions.appendChild(actionButton('Старт', '', vm.state !== 'shut_off', () => manage(vm.name, 'start')));
+      actions.appendChild(actionButton('Стоп', 'secondary', vm.state !== 'running', () => manage(vm.name, 'stop')));
+      if (vm.name.startsWith('cm-api-')) {
+        actions.appendChild(actionButton('Удалить', 'danger', vm.state !== 'shut_off', () => manage(vm.name, 'delete')));
+      }
+      row.appendChild(actions);
+      body.appendChild(row);
+    }
+  }
+
+  async function refresh() {
+    const [vms, quota] = await Promise.all([api('/vms'), api('/quota')]);
+    document.getElementById('cpu-usage').textContent = `${quota.used.cpus} / ${quota.limits.cpus}`;
+    document.getElementById('ram-usage').textContent = `${quota.used.memory_mb} / ${quota.limits.memory_mb} MiB`;
+    document.getElementById('vm-count').textContent = vms.length;
+    renderVMs(vms);
+    document.getElementById('updated').textContent = `Обновлено: ${new Date().toLocaleTimeString('ru-RU')}`;
+  }
+
+  async function manage(name, operation) {
+    if (busy) return;
+    if (operation === 'delete' && !confirm(`Удалить ${name} и его диски?`)) return;
+    busy = true;
+    try {
+      const options = operation === 'delete' ? { method: 'DELETE' } : { method: 'POST' };
+      const path = operation === 'delete' ? `/vms/${encodeURIComponent(name)}` : `/vms/${encodeURIComponent(name)}/${operation}`;
+      await api(path, options);
+      message(`Операция ${operation} для ${name} выполнена или принята.`);
+      await refresh();
+    } catch (error) {
+      message(error.message, 'error');
+    } finally {
+      busy = false;
+    }
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    busy = true;
+    const submit = document.getElementById('create-btn');
+    submit.disabled = true;
+    try {
+      const fields = new FormData(form);
+      const payload = {
+        name: String(fields.get('name')).trim(),
+        cpus: Number(fields.get('cpus')),
+        memory_mb: Number(fields.get('memory_mb')),
+        disk_gb: Number(fields.get('disk_gb'))
+      };
+      const hostname = String(fields.get('hostname')).trim();
+      const key = String(fields.get('ssh_public_key')).trim();
+      if (hostname) payload.hostname = hostname;
+      if (key) payload.ssh_public_key = key;
+      await api('/vms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      message(`ВМ ${payload.name} создана.`);
+      await refresh();
+    } catch (error) {
+      message(error.message, 'error');
+    } finally {
+      busy = false;
+      submit.disabled = false;
+    }
+  });
+
+  document.getElementById('refresh').addEventListener('click', () => {
+    if (!busy) refresh().catch(error => message(error.message, 'error'));
+  });
+  refresh().catch(error => message(error.message, 'error'));
+  setInterval(() => {
+    if (!busy) refresh().catch(error => message(error.message, 'error'));
+  }, 5000);
+</script>
+</body>
+</html>

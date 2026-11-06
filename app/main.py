@@ -1,6 +1,8 @@
 import libvirt
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException
+from pathlib import Path
+from fastapi.responses import FileResponse
 
 from app.vm_manager import (
     VMNotFound,
@@ -109,3 +111,11 @@ def create_vm_endpoint(request: VMCreateRequest):
 @app.delete("/vms/{name}")
 def delete_vm_endpoint(name: str):
     return execute(delete_vm, name)
+
+@app.get("/", include_in_schema=False)
+def dashboard():
+    return FileResponse(
+        Path(__file__).resolve().parent.parent
+        / "web"
+        / "index.html"
+    )

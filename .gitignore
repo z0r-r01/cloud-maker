@@ -1,20 +1,40 @@
-# Python
-__pycache__/
-*.pyc
+# Python virtual environments (both names used during development)
 .venv/
+venv/
+env/
+ENV/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Environment and local secrets
 .env
-
-# Virtual machines
-*.qcow2
-*.img
-*.iso
-
-# Private SSH keys
+.env.*
+!.env.example
 *.pem
 id_rsa
 id_ed25519
 cloud-maker-test
+cloud-maker-test.pub
+*.key
 
-# Generated files
+# Virtual machine images and generated resources
+*.qcow2
+*.img
+*.iso
 data/
 runtime/
+
+# Logs / temporary files
+*.log
+*.tmp
+.DS_Store
+
+# Local editor settings
+.vscode/
+.idea/

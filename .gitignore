@@ -38,3 +38,6 @@ runtime/
 # Local editor settings
 .vscode/
 .idea/
+
+# Backup files
+*.bak

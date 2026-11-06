@@ -26,6 +26,16 @@ class VMCreateRequest(BaseModel):
     memory_mb: int = Field(default=1024, ge=512, le=4096)
     disk_gb: int = Field(default=10, ge=5, le=30)
 
+    hostname: str | None = Field(
+        default=None,
+        max_length=63,
+    )
+
+    ssh_public_key: str | None = Field(
+        default=None,
+        max_length=4096,
+    )
+
 def execute(action, *args):
     try:
         return action(*args)
@@ -87,6 +97,8 @@ def create_vm_endpoint(request: VMCreateRequest):
         request.cpus,
         request.memory_mb,
         request.disk_gb,
+	request.hostname,
+	request.ssh_public_key
     )
 
 

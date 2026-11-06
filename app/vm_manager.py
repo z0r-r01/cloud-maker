@@ -6,6 +6,7 @@ import subprocess
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from app.cloudinit import create_cloud_init
 
 LIBVIRT_URI = "qemu:///system"
 
@@ -233,49 +234,7 @@ def build_vm_xml(name, cpus, memory_mb, disk_path, seed_path):
 
     return ET.tostring(domain, encoding="unicode")
 
-def create_cloud_init(name, seed_path):
-    public_key = SSH_PUBLIC_KEY.read_text().strip()
-
-    if not public_key.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-")):
-        raise ValueError("Invalid SSH public key")
-
-    user_data = f"""#cloud-config
-hostname: {name}
-users:
-  - default
-ssh_authorized_keys:
-  - {public_key}
-ssh_pwauth: false
-"""
-
-    metadata = f"""instance-id: {name}
-local-hostname: {name}
-"""
-
-    user_file = API_IMAGE_DIR / f"{name}-user-data"
-    meta_file = API_IMAGE_DIR / f"{name}-meta-data"
-
-    try:
-        user_file.write_text(user_data)
-        meta_file.write_text(metadata)
-
-        subprocess.run(
-            [
-                "cloud-localds",
-                str(seed_path),
-                str(user_file),
-                str(meta_file),
-            ],
-            check=True,
-        )
-
-        os.chmod(seed_path, 0o660)
-
-    finally:
-        user_file.unlink(missing_ok=True)
-        meta_file.unlink(missing_ok=True)
-
-def create_vm(name, cpus, memory_mb, disk_gb):
+def create_vm(name, cpus, memory_mb, disk_gb, hostname=None, ssh_public_key=None):
     if not re.fullmatch(r"cm-api-[a-z0-9-]+", name):
         raise ValueError("VM name must start with cm-api-")
 
@@ -294,7 +253,7 @@ def create_vm(name, cpus, memory_mb, disk_gb):
     if not BASE_IMAGE.is_file():
         raise RuntimeError("Base Ubuntu image not found")
 
-    if not SSH_PUBLIC_KEY.is_file():
+    if ssh_public_key is None and not SSH_PUBLIC_KEY.is_file():
         raise RuntimeError("SSH public key not found")
 
     with VM_LOCK:
@@ -330,7 +289,7 @@ def create_vm(name, cpus, memory_mb, disk_gb):
                 os.chmod(disk_path, 0o660)
 
                 # Создаём конфигурацию cloud-init
-                create_cloud_init(name, seed_path)
+                create_cloud_init(name, seed_path, hostname, ssh_public_key,)
 
                 # Формируем XML
                 xml = build_vm_xml(

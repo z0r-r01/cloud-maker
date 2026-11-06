@@ -207,28 +207,35 @@ def quota_snapshot(server):
 
 
 def cleanup_owned_vm(name):
-    """Аварийная очистка ТОЛЬКО нашей ВМ, даже если API не запущен."""
+    """Очистка исключительно нашей тестовой ВМ, безопасная при сбое libvirt."""
+    can_remove_disks = False
     try:
         import libvirt
         conn = libvirt.open("qemu:///system")
-        if conn is not None:
-            try:
-                domains = conn.listAllDomains()
-
-                vm = next(
-                    (domain for domain in domains if domain.name() == name),
-                    None,
-                )
-
-                if vm is not None:
-                    if vm.isActive():
-                        vm.destroy()
-
-                    vm.undefine()
-            finally:
-                conn.close()
+        if conn is None:
+            raise RuntimeError("Cannot connect to libvirt")
+        try:
+            vm = next(
+                (domain for domain in conn.listAllDomains()
+                 if domain.name() == name),
+                None,
+            )
+            if vm is not None:
+                if vm.isActive():
+                    vm.destroy()
+                vm.undefine()
+            # На случай ошибки удаления проверяем отсутствие домена ещё раз.
+            can_remove_disks = not any(
+                domain.name() == name for domain in conn.listAllDomains()
+            )
+        finally:
+            conn.close()
     except Exception as exc:
-        info(f"Не удалось завершить аварийную очистку в libvirt: {exc}")
+        info(f"Не удалось полностью очистить libvirt: {exc}")
+
+    if not can_remove_disks:
+        info(f"Диски {name} сохранены: удаление ВМ не подтверждено.")
+        return
 
     for suffix in (".qcow2", "-seed.iso"):
         path = IMAGE_DIR / f"{name}{suffix}"

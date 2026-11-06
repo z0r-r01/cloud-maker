@@ -11,6 +11,7 @@ from app.vm_manager import (
     stop_vm,
     create_vm,
     delete_vm,
+    get_quota,
 )
 
 
@@ -69,6 +70,9 @@ def execute(action, *args):
 def health():
     return {"status": "ok"}
 
+@app.get("/quota")
+def quota_endpoint():
+    return execute(get_quota)
 
 @app.get("/vms")
 def get_vms():

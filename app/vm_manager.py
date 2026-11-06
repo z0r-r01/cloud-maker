@@ -9,6 +9,8 @@ from pathlib import Path
 from app.cloudinit import create_cloud_init
 
 LIBVIRT_URI = "qemu:///system"
+MAX_TOTAL_CPUS = 4
+MAX_TOTAL_MEMORY_MB = 4096
 
 IMAGE_DIR = Path("/var/lib/libvirt/images/cloud-maker")
 API_IMAGE_DIR = IMAGE_DIR / "api"
@@ -271,6 +273,26 @@ def create_vm(name, cpus, memory_mb, disk_gb, hostname=None, ssh_public_key=None
 
             if disk_path.exists() or seed_path.exists():
                 raise VMConflict("VM storage files already exist")
+            
+            # Проверяем суммарные квоты до создания диска
+            quota = quota_snapshot(conn)
+
+            new_total_cpus = quota["used"]["cpus"] + cpus
+
+            new_total_memory = (
+                quota["used"]["memory_mb"] + memory_mb
+            )
+
+            if (
+                new_total_cpus > MAX_TOTAL_CPUS
+                or new_total_memory > MAX_TOTAL_MEMORY_MB
+            ):
+                raise VMConflict(
+                    "Resource quota exceeded. "
+                    f"Available: {quota['available']['cpus']} vCPU, "
+                    f"{quota['available']['memory_mb']} MiB RAM. "
+                    f"Requested: {cpus} vCPU, {memory_mb} MiB RAM."
+                )
 
             try:
                 # Создаём диск из базового образа
@@ -386,3 +408,67 @@ def delete_vm(name):
 
         finally:
             conn.close()
+
+def quota_snapshot(conn):
+    used_cpus = 0
+    used_memory_mb = 0
+
+    for vm in conn.listAllDomains():
+        if not vm.name().startswith("cm-"):
+            continue
+
+        # Читаем сохранённую конфигурацию ВМ.
+        # Она существует и для выключенных машин.
+        xml = ET.fromstring(
+            vm.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        )
+
+        vcpu_element = xml.find("vcpu")
+        memory_element = xml.find("memory")
+
+        if vcpu_element is None or memory_element is None:
+            raise RuntimeError("VM resource configuration is missing")
+
+        cpus = int(vcpu_element.text)
+
+        memory_value = int(memory_element.text)
+        unit = memory_element.get("unit", "KiB")
+
+        if unit == "KiB":
+            memory_mb = (memory_value + 1023) // 1024
+        elif unit == "MiB":
+            memory_mb = memory_value
+        elif unit == "GiB":
+            memory_mb = memory_value * 1024
+        else:
+            raise RuntimeError(f"Unsupported memory unit: {unit}")
+
+        used_cpus += cpus
+        used_memory_mb += memory_mb
+
+    return {
+        "limits": {
+            "cpus": MAX_TOTAL_CPUS,
+            "memory_mb": MAX_TOTAL_MEMORY_MB,
+        },
+        "used": {
+            "cpus": used_cpus,
+            "memory_mb": used_memory_mb,
+        },
+        "available": {
+            "cpus": max(0, MAX_TOTAL_CPUS - used_cpus),
+            "memory_mb": max(
+                0,
+                MAX_TOTAL_MEMORY_MB - used_memory_mb,
+            ),
+        },
+    }
+
+
+def get_quota():
+    conn = connect()
+
+    try:
+        return quota_snapshot(conn)
+    finally:
+        conn.close()

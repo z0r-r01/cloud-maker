@@ -336,19 +336,72 @@ def create_vm(name, cpus, memory_mb, disk_gb, hostname=None, ssh_public_key=None
                     "vm": vm_to_dict(vm),
                 }
 
-            except Exception:
-                # При ошибке убираем частично созданные ресурсы
-                if vm is not None:
+            except Exception as original_error:
+                cleanup_confirmed = False
+                cleanup_error = None
+
+                if vm is None:
+                    # Не удалось получить дескриптор созданной ВМ.
+                    # Не трогаем домен, владение которым не подтверждено.
+                    try:
+                        conn.lookupByName(name)
+                    except libvirt.libvirtError as exc:
+                        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                            cleanup_confirmed = True
+                        else:
+                            cleanup_error = exc
+                    else:
+                        cleanup_error = RuntimeError(
+                            "VM exists, but ownership cannot be confirmed"
+                        )
+
+                else:
                     try:
                         if vm.isActive():
                             vm.destroy()
 
-                        vm.undefine()
-                    except libvirt.libvirtError:
-                        pass
+                        if vm.isActive():
+                            raise RuntimeError("VM is still active")
 
-                disk_path.unlink(missing_ok=True)
-                seed_path.unlink(missing_ok=True)
+                        vm.undefine()
+
+                        # Проверяем, что ВМ действительно удалена
+                        try:
+                            conn.lookupByName(name)
+                        except libvirt.libvirtError as exc:
+                            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                                cleanup_confirmed = True
+                            else:
+                                cleanup_error = exc
+                        else:
+                            cleanup_error = RuntimeError(
+                                "VM definition still exists"
+                            )
+
+                    except Exception as exc:
+                        cleanup_error = exc
+
+                if cleanup_confirmed:
+                    try:
+                        disk_path.unlink(missing_ok=True)
+                        seed_path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        raise RuntimeError(
+                            "VM was removed, but storage cleanup failed: "
+                            f"{exc}"
+                        ) from original_error
+                else:
+                    reason = (
+                        f" Cleanup error: {cleanup_error}"
+                        if cleanup_error else ""
+                    )
+
+                    raise RuntimeError(
+                        "VM creation failed and cleanup could not be "
+                        "confirmed. Storage files were preserved: "
+                        f"{disk_path}, {seed_path}.{reason}"
+                    ) from original_error
+
                 raise
 
         finally:

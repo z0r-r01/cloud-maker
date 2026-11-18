@@ -6,7 +6,11 @@ import subprocess
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from app.cloudinit import create_cloud_init
+from app.cloudinit import (
+    create_cloud_init,
+    validate_hostname,
+    validate_ssh_key,
+)
 
 LIBVIRT_URI = "qemu:///system"
 MAX_TOTAL_CPUS = 4
@@ -249,14 +253,24 @@ def create_vm(name, cpus, memory_mb, disk_gb, hostname=None, ssh_public_key=None
     if not 5 <= disk_gb <= 30:
         raise ValueError("Disk size must be between 5 and 30 GB")
 
+    # Проверяем hostname до создания ресурсов
+    hostname = hostname if hostname is not None else name
+    validate_hostname(hostname)
+
+    # Загружаем и проверяем SSH-ключ
+    if ssh_public_key is None:
+        if not SSH_PUBLIC_KEY.is_file():
+            raise RuntimeError("SSH public key not found")
+
+        ssh_public_key = SSH_PUBLIC_KEY.read_text().strip()
+
+    ssh_public_key = validate_ssh_key(ssh_public_key)
+
     disk_path = API_IMAGE_DIR / f"{name}.qcow2"
     seed_path = API_IMAGE_DIR / f"{name}-seed.iso"
 
     if not BASE_IMAGE.is_file():
         raise RuntimeError("Base Ubuntu image not found")
-
-    if ssh_public_key is None and not SSH_PUBLIC_KEY.is_file():
-        raise RuntimeError("SSH public key not found")
 
     with VM_LOCK:
         conn = connect()

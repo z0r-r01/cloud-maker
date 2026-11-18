@@ -48,6 +48,50 @@ if sudo test -e "$VM_DISK"; then
     exit 1
 fi
 
+# Проверяем суммарные квоты Cloud Maker
+if ! python3 - "$CPUS" "$MEMORY" <<'PY'
+import sys
+from app.vm_manager import connect, quota_snapshot
+
+requested_cpus = int(sys.argv[1])
+requested_memory_mb = int(sys.argv[2])
+
+conn = None
+
+try:
+    conn = connect()
+    quota = quota_snapshot(conn)
+    available = quota["available"]
+
+    if (
+        requested_cpus > available["cpus"]
+        or requested_memory_mb > available["memory_mb"]
+    ):
+        print("Ошибка: превышены квоты Cloud Maker.", file=sys.stderr)
+        print(
+            f"Доступно: {available['cpus']} vCPU, "
+            f"{available['memory_mb']} MiB RAM.",
+            file=sys.stderr,
+        )
+        print(
+            f"Запрошено: {requested_cpus} vCPU, "
+            f"{requested_memory_mb} MiB RAM.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+except Exception as exc:
+    print(f"Ошибка проверки квот: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+finally:
+    if conn is not None:
+        conn.close()
+PY
+then
+    exit 1
+fi
+
 echo "Создаём виртуальную машину: $NAME"
 
 # Копируем базовый образ
